@@ -16,7 +16,7 @@ from abc import ABC, abstractmethod
 from .actions import Aktion, Beobachtung, Entscheidung, Option
 from .agent import FIXKOSTEN_PRO_TICK
 from .memory import Ereignis
-from .world import WOHNUNG, PARK
+from .world import PARK, RASTORTE, WOHNUNG
 
 # Schwellen der Routine
 KAUFEN_AB = 40  # an einem Laden wird ab diesem Hunger eingekauft
@@ -92,12 +92,13 @@ class RoutinePolicy(Policy):
                 grund = f"Hunger {b.hunger}, {laden.target} ({laden.minuten} min, {laden.preis} €)"
                 return Aktion.MOVE, laden.target, grund, schliessungen
 
-        # 3. Erschöpft: ausruhen, sonst nach Hause.
+        # 3. Erschöpft: hier ausruhen, sonst zum nächsten Ruheort.
         if b.energie <= MUEDE_BIS:
             if b.option(Aktion.REST, b.ort):
                 return Aktion.REST, b.ort, f"Energie {b.energie}", []
-            if b.option(Aktion.MOVE, WOHNUNG):
-                return Aktion.MOVE, WOHNUNG, f"Energie {b.energie}, nach Hause", []
+            ruhen = self._ruhen(b, f"Energie {b.energie}")
+            if ruhen is not None:
+                return ruhen
 
         # 4. Arbeitszeit: zur Arbeit bzw. arbeiten.
         if b.job is not None and ist_arbeitszeit(b.stunde):
@@ -106,12 +107,11 @@ class RoutinePolicy(Policy):
             if b.option(Aktion.MOVE, b.job):
                 return Aktion.MOVE, b.job, "Arbeitszeit, zur Arbeit", []
 
-        # 5. Nacht: zu Hause schlafen.
+        # 5. Nacht: zu Hause schlafen (ist die Wohnung zu, am nächsten Ruheort).
         if ist_nacht(b.stunde):
-            if b.option(Aktion.REST, WOHNUNG):
-                return Aktion.REST, WOHNUNG, "Nachtruhe", []
-            if b.option(Aktion.MOVE, WOHNUNG):
-                return Aktion.MOVE, WOHNUNG, "Nacht, nach Hause", []
+            ruhen = self._ruhen(b, "Nachtruhe")
+            if ruhen is not None:
+                return ruhen
 
         # 6. Freizeit.
         if b.ort == PARK:
@@ -130,11 +130,27 @@ class RoutinePolicy(Policy):
             if b.option(Aktion.REST, WOHNUNG):
                 return Aktion.REST, WOHNUNG, "Freizeit zu Hause", []
 
-        # 7. Sonst nach Hause, und wenn das nicht geht, die erste Option.
-        if b.option(Aktion.MOVE, WOHNUNG):
-            return Aktion.MOVE, WOHNUNG, "nichts zu tun, nach Hause", []
+        # 7. Sonst nach Hause bzw. zum nächsten Ruheort, notfalls die erste Option.
+        ruhen = self._ruhen(b, "nichts zu tun")
+        if ruhen is not None:
+            return ruhen
         erste = b.optionen[0]
         return erste.action, erste.target, "keine passende Regel, erste gültige Option", []
+
+    @staticmethod
+    def _ruhen(b: Beobachtung, grund: str) -> tuple[Aktion, str, str, list[int]] | None:
+        """Ausruhen in der Wohnung; ist sie zu, am nächsten offenen Ruheort."""
+        if b.option(Aktion.REST, WOHNUNG):
+            return Aktion.REST, WOHNUNG, grund, []
+        if b.option(Aktion.MOVE, WOHNUNG):
+            return Aktion.MOVE, WOHNUNG, f"{grund}, nach Hause", []
+        if b.ort in RASTORTE and b.option(Aktion.REST, b.ort):
+            return Aktion.REST, b.ort, grund, []
+        ziele = [o for o in b.optionen_fuer(Aktion.MOVE) if o.target in RASTORTE]
+        if not ziele:
+            return None
+        ziel = min(ziele, key=lambda o: (o.minuten, o.target))
+        return Aktion.MOVE, ziel.target, f"{grund}, Wohnung zu, zum Ausruhen: {ziel.target}", []
 
     @staticmethod
     def _laden_waehlen(b: Beobachtung) -> Option | None:

@@ -88,6 +88,11 @@ class Welt:
     def anwesende(self, ort: str) -> list[int]:
         return sorted(self.anwesend[ort])
 
+    def hat_andere(self, ort: str, agent_id: int) -> bool:
+        """Ist außer ``agent_id`` noch jemand am Ort?"""
+        anwesend = self.anwesend[ort]
+        return len(anwesend) > (1 if agent_id in anwesend else 0)
+
     # --- Änderungen (nur durch die Engine) ------------------------------
 
     def schliesse(self, ort: str) -> None:

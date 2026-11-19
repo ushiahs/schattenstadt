@@ -76,7 +76,7 @@ class Schritt:
     action: Aktion
     target: str
     ort_vorher: str
-    wirkung: bool  # hat die Aktion Hunger, Energie oder Geld verändert?
+    wirkung: bool  # hat die Aktion Hunger, Energie oder Geld verändert? (Wege zählen nicht)
 
 
 @dataclass(frozen=True)
@@ -104,8 +104,9 @@ def erkenne_loop(
     Ein Loop liegt vor, wenn dieselbe Folge von (Aktion, Ziel) ``wiederholungen``-
     mal direkt hintereinander vorkommt und sich dabei der Zustand nicht ändert:
     Keine Aktion im Fenster hat Hunger, Energie oder Geld verändert, und jede
-    Wiederholung beginnt am selben Ort. Das passive Weiterlaufen der Bedürfnisse
-    zählt nicht als Zustandsänderung.
+    Wiederholung beginnt am selben Ort. Nicht als Zustandsänderung zählen das
+    passive Weiterlaufen der Bedürfnisse und die Energie, die ein Weg kostet:
+    Ein Weg, der wieder am Ausgangsort endet, ist verschwendet.
     """
     schritte = list(verlauf)
     for laenge in range(1, max_laenge + 1):
@@ -131,6 +132,8 @@ class Engine:
             raise ValueError("schliessen und schliessen_bei nur zusammen angeben")
         if konfig.schliessen is not None and konfig.schliessen not in ORTE:
             raise ValueError(f"unbekannter Ort: {konfig.schliessen}")
+        if konfig.schliessen_bei is not None and not 0 <= konfig.schliessen_bei < konfig.ticks:
+            raise ValueError(f"schliessen_bei muss zwischen 0 und {konfig.ticks - 1} liegen")
 
         self.konfig = konfig
         self.rng = random.Random(konfig.seed)
@@ -246,8 +249,9 @@ class Engine:
         return pruefe(self.routine.entscheide(b), b), "routine_fallback"
 
     def _fuehre_aus(self, agent: Agent, e: Entscheidung) -> bool:
-        """Führt eine geprüfte Entscheidung aus. Rückgabe: ob sich Hunger,
-        Energie oder Geld durch die Aktion geändert haben."""
+        """Führt eine geprüfte Entscheidung aus. Rückgabe: ob die Aktion Hunger,
+        Energie oder Geld verändert hat. Ein Weg zählt dabei nicht, auch wenn er
+        Energie kostet (siehe ``erkenne_loop``)."""
         t = self.tick
         if e.action == Aktion.MOVE:
             minuten = self.welt.wegzeit(agent.ort, e.target, agent.auto)
@@ -327,16 +331,22 @@ class Engine:
         if laenge is None:
             return
         folge = " -> ".join(f"{s.action}:{s.target}" for s in list(verlauf)[-laenge:])
+        befund = f"Folge [{folge}] {LOOP_WIEDERHOLUNGEN}x ohne Zustandsänderung"
+        verlauf.clear()
+        if self.policy is self.routine or self._routine_bis.get(agent.id, -1) > self.tick:
+            # Die Routine selbst dreht sich im Kreis. Ein Eingriff würde nichts
+            # ändern; das ist ein Fehler in den Regeln und wird so gemeldet.
+            self.zaehler["loop_routine"] += 1
+            self._protokolliere(agent.id, "loop_routine", f"{befund}, Fehler in der RoutinePolicy", logging.ERROR)
+            return
         self._routine_bis[agent.id] = self.tick + 1 + self.konfig.loop_sperre
         self.zaehler["loop"] += 1
         self._protokolliere(
             agent.id,
             "loop",
-            f"Folge [{folge}] {LOOP_WIEDERHOLUNGEN}x ohne Zustandsänderung, "
-            f"RoutinePolicy bis einschließlich Tick {self.tick + self.konfig.loop_sperre}",
+            f"{befund}, RoutinePolicy bis einschließlich Tick {self.tick + self.konfig.loop_sperre}",
             logging.WARNING,
         )
-        verlauf.clear()
 
     def pruefe_invarianten(self) -> None:
         """Geld nie negativ, Bedürfnisse im Bereich, jeder Agent an genau einem Ort."""

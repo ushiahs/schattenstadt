@@ -46,3 +46,9 @@ def test_verletzung_bricht_den_tick_ab():
     engine.welt.platziere(1, PARK)
     with pytest.raises(InvariantenVerletzung):
         engine.schritt()
+
+
+@pytest.mark.parametrize("bei", [-1, 100, 150])
+def test_schliessung_ausserhalb_des_laufs_wird_abgelehnt(bei):
+    with pytest.raises(ValueError, match="schliessen_bei"):
+        Engine(Konfig(ticks=100, schliessen=SUPERMARKT, schliessen_bei=bei))

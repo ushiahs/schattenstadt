@@ -3,7 +3,7 @@ import pytest
 from schattenstadt.actions import Aktion, Beobachtung, Entscheidung
 from schattenstadt.engine import Engine, Konfig, Schritt, erkenne_loop
 from schattenstadt.policy import Policy
-from schattenstadt.world import PARK, SUPERMARKT, WOHNUNG
+from schattenstadt.world import ORTE, PARK, SUPERMARKT, WOHNUNG
 
 M = Aktion.MOVE
 
@@ -89,7 +89,21 @@ def test_engine_greift_bei_loop_ein_und_gibt_spaeter_zurueck():
     assert quellen[16] == "pendel"
 
 
-@pytest.mark.parametrize("seed", range(10))
-def test_routine_erzeugt_keine_loops(seed):
-    engine = Engine(Konfig(seed=seed, schliessen=SUPERMARKT, schliessen_bei=50)).laufe()
+@pytest.mark.parametrize("ort", [None, *ORTE])
+@pytest.mark.parametrize("seed", range(5))
+def test_routine_erzeugt_keine_loops(seed, ort):
+    konfig = Konfig(seed=seed, schliessen=ort, schliessen_bei=None if ort is None else 50)
+    engine = Engine(konfig).laufe()
     assert engine.zaehler["loop"] == 0
+    assert engine.zaehler["loop_routine"] == 0
+
+
+def test_loop_der_routine_wird_als_regelfehler_gemeldet():
+    """Ist die Policy schon die Routine, kann kein Eingriff helfen: Die Engine
+    meldet einen Regelfehler statt eines Eingriffs."""
+    engine = Engine(Konfig(agenten=1, ticks=8))
+    engine.routine = engine.policy = PendelPolicy()
+    engine.laufe()
+    assert engine.zaehler["loop"] == 0
+    assert engine.zaehler["loop_routine"] == 1
+    assert [p.art for p in engine.protokoll] == ["loop_routine"]

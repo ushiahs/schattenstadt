@@ -80,14 +80,25 @@ def test_llm_prompt_enthaelt_optionen_erinnerungen_und_schema():
     assert "Ziel war geschlossen" in prompt
 
 
-def test_routine_ist_deterministisch_je_beobachtung():
-    engine = Engine(Konfig(agenten=5, ticks=30))
-    engine.laufe()
+def test_routine_haengt_nicht_von_der_aufrufreihenfolge_ab():
+    """Gleiche Beobachtung, gleiche Entscheidung, egal welche anderen Agenten
+    vorher gefragt wurden (der Zufall hängt an Seed, Agent und Tick)."""
     from schattenstadt.actions import gueltige_optionen
 
-    agent = engine.agenten[2]
-    b = Beobachtung(
-        tick=30, stunde=12, agent_id=2, ort=agent.ort, hunger=agent.hunger, energie=agent.energie,
-        geld=agent.geld, job=agent.job, auto=agent.auto, optionen=gueltige_optionen(engine.welt, agent),
-    )
-    assert RoutinePolicy(7).entscheide(b) == RoutinePolicy(7).entscheide(b)
+    engine = Engine(Konfig(agenten=6, ticks=30)).laufe()
+
+    def lage(agent, stunde):
+        return Beobachtung(
+            tick=30, stunde=stunde, agent_id=agent.id, ort=agent.ort, hunger=10, energie=80,
+            geld=agent.geld, job=None, auto=agent.auto, optionen=gueltige_optionen(engine.welt, agent),
+        )
+
+    beobachtungen = [lage(a, 13) for a in engine.agenten]  # Freizeit: hier wirkt der Zufall
+    vorwaerts = [RoutinePolicy(7).entscheide(b) for b in beobachtungen]
+    policy = RoutinePolicy(7)
+    rueckwaerts = [policy.entscheide(b) for b in reversed(beobachtungen)][::-1]
+    assert vorwaerts == rueckwaerts
+    einzeln = RoutinePolicy(7)
+    for b in beobachtungen[1:]:
+        einzeln.entscheide(b)
+    assert einzeln.entscheide(beobachtungen[0]) == vorwaerts[0]

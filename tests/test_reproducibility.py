@@ -12,7 +12,9 @@ def fingerabdruck(seed):
         engine.zuege,
         engine.einkaufswege,
         [(a.id, a.ort, a.hunger, a.energie, a.geld) for a in engine.agenten],
-        engine.gedaechtnis.anzahl_erinnerungen(),
+        engine.gedaechtnis._db.execute(
+            "SELECT id, tick, agent_id, typ, text, wichtigkeit FROM erinnerungen ORDER BY id"
+        ).fetchall(),
         engine.gedaechtnis.routine(),
         dict(engine.zaehler),
     )

@@ -155,6 +155,6 @@ def gueltige_optionen(welt: Welt, agent: Agent) -> tuple[Option, ...]:
             optionen.append(Option(action=Aktion.WORK, target=hier))
         if hier in RASTORTE:
             optionen.append(Option(action=Aktion.REST, target=hier))
-        if any(anderer != agent.id for anderer in welt.anwesende(hier)):
+        if welt.hat_andere(hier, agent.id):
             optionen.append(Option(action=Aktion.TALK, target=hier))
     return tuple(optionen)
