@@ -83,12 +83,16 @@ identisch, danach zeigt der Unterschied die Wirkung der Schließung.
   der Agent losging (meist Wohnung oder Arbeit).
 - **Betroffen:** Ein Agent braucht ab der Schließung je Einkauf im Schnitt
   mindestens 1 Minute länger als im Vergleichslauf im selben Zeitraum, oder
-  er kauft gar nicht mehr ein. Kleinere Unterschiede entstehen schon, wenn
-  ein Agent von einem anderen Ort aus losgeht.
+  er kauft bis zum Laufende nicht mehr ein. Die Schwelle blendet
+  Kleinstunterschiede aus, etwa wenn ein Agent vom Park statt von der Wohnung
+  aus losgeht; größere Verschiebungen des Startorts filtert sie nicht.
+  Bleiben nach der Schließung weniger als 24 Ticks, gibt der Bericht einen
+  Hinweis aus, weil „kein Einkauf bis Laufende“ dann oft nur heißt, dass der
+  Agent noch unterwegs ist.
 - **Wen trifft es am härtesten:** mittlerer Mehrweg je Einkauf gegenüber dem
   Vergleich, nach Auto und Job gruppiert.
-- Zusätzlich zeigt die Ausgabe die reine Strecke Wohnung → nächster offener
-  Laden vor und nach der Schließung.
+- Schließt ein Laden, zeigt die Ausgabe zusätzlich die reine Strecke
+  Wohnung → nächster offener Laden vor und nach der Schließung.
 
 ## Start
 
@@ -119,7 +123,7 @@ Durchschnittliche Einkaufswegzeit (Minuten je Hinweg zum Laden)
   ohne Auto      8,5     26,1        8,5   35/39/39
   Vergleich: Lauf ohne Schließung, ebenfalls ab Tick 50.
 
-Betroffene Agenten (ab Tick 50 je Einkauf mindestens 1,0 min länger als im Vergleich, oder kein Einkauf mehr): 20 von 20
+Betroffene Agenten (ab Tick 50 je Einkauf mindestens 1,0 min länger als im Vergleich, oder bis Laufende kein Einkauf): 20 von 20
   mit Auto:   7 von 7
   ohne Auto:  13 von 13
 

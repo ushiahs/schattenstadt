@@ -6,7 +6,7 @@ Bei einer Schließung läuft zusätzlich ein Vergleichslauf mit gleichem Seed
 ohne Schließung. Bis zur Schließung sind beide Läufe identisch. Betroffen ist
 ein Agent, der ab der Schließung im Schnitt mindestens ``MINDEST_MEHRWEG``
 Minuten länger zum Laden braucht als im Vergleichslauf im selben Zeitraum,
-oder der gar nicht mehr einkauft.
+oder der bis zum Laufende nicht mehr einkauft.
 """
 
 from __future__ import annotations
@@ -23,10 +23,14 @@ from .engine import Einkaufsweg, Engine, Konfig
 from .policy import LLMPolicy, Policy
 from .world import LAEDEN, ORTE
 
-# Ab so vielen Minuten Mehrweg je Einkauf gilt ein Agent als betroffen.
-# Kleinere Unterschiede entstehen schon, wenn ein Agent von einem anderen Ort
-# aus losgeht, und sagen über die Schließung wenig.
+# Ab so vielen Minuten Mehrweg je Einkauf gilt ein Agent als betroffen. Die
+# Schwelle blendet Kleinstunterschiede aus (etwa vom Park statt von der Wohnung
+# aus losgegangen); größere Verschiebungen des Startorts filtert sie nicht.
 MINDEST_MEHRWEG = 1.0
+
+# Bleiben nach der Schließung weniger Ticks, warnt der Bericht: Wer dann
+# nicht mehr einkauft, war oft nur noch unterwegs zum Ersatzladen.
+MINDEST_RESTFENSTER = 24
 
 GRUPPEN: tuple[tuple[str, Callable[[bool], bool]], ...] = (
     ("alle", lambda auto: True),
@@ -127,19 +131,26 @@ def bericht(lauf: Engine, vergleich: Engine | None = None) -> str:
         if vergleich is None:
             raise ValueError("bei einer Schließung braucht der Bericht den Vergleichslauf")
         ab = k.schliessen_bei
-        zeilen += [
-            f"Schließung: {k.schliessen} bei Tick {ab}. Vergleich: gleicher Seed ohne Schließung.",
-            "",
-            "Weg von der Wohnung zum nächsten offenen Laden (Minuten)",
-            f"  {'':<10} {'vorher':>7} {'nachher':>8}",
-        ]
-        for name, passt in GRUPPEN[1:]:
-            gruppe = [a for a in lauf.agenten if passt(a.auto)]
-            vorher = _mittel(x for a in gruppe if (x := naechster_laden(lauf, a.wohnort, a.auto)) is not None)
-            nachher = _mittel(
-                x for a in gruppe if (x := naechster_laden(lauf, a.wohnort, a.auto, [k.schliessen])) is not None
+        zeilen.append(f"Schließung: {k.schliessen} bei Tick {ab}. Vergleich: gleicher Seed ohne Schließung.")
+        rest = k.ticks - ab
+        if rest < MINDEST_RESTFENSTER:
+            zeilen.append(
+                f"Hinweis: Nach der Schließung bleiben nur {rest} Tick{'' if rest == 1 else 's'}. "
+                "„Kein Einkauf bis Laufende“ heißt dann oft nur: noch unterwegs zum Ersatzladen."
             )
-            zeilen.append(f"  {name:<10} {_zahl(vorher):>7} {_zahl(nachher):>8}")
+        if k.schliessen in LAEDEN:
+            zeilen += [
+                "",
+                "Weg von der Wohnung zum nächsten offenen Laden (Minuten)",
+                f"  {'':<10} {'vorher':>7} {'nachher':>8}",
+            ]
+            for name, passt in GRUPPEN[1:]:
+                gruppe = [a for a in lauf.agenten if passt(a.auto)]
+                vorher = _mittel(x for a in gruppe if (x := naechster_laden(lauf, a.wohnort, a.auto)) is not None)
+                nachher = _mittel(
+                    x for a in gruppe if (x := naechster_laden(lauf, a.wohnort, a.auto, [k.schliessen])) is not None
+                )
+                zeilen.append(f"  {name:<10} {_zahl(vorher):>7} {_zahl(nachher):>8}")
 
         zeilen += [
             "",
@@ -165,14 +176,14 @@ def bericht(lauf: Engine, vergleich: Engine | None = None) -> str:
             betroffen = [b for b in vergleichbar if b.betroffen]
             zeilen.append(
                 f"Betroffene Agenten (ab Tick {ab} je Einkauf mindestens {_zahl(MINDEST_MEHRWEG)} min länger "
-                f"als im Vergleich, oder kein Einkauf mehr): {len(betroffen)} von {len(vergleichbar)}"
+                f"als im Vergleich, oder bis Laufende kein Einkauf): {len(betroffen)} von {len(vergleichbar)}"
             )
             for name, passt in GRUPPEN[1:]:
                 gruppe = [b for b in vergleichbar if passt(b.auto)]
                 zeilen.append(f"  {name + ':':<11} {sum(b.betroffen for b in gruppe)} von {len(gruppe)}")
             ohne_einkauf = sum(b.kein_einkauf_mehr for b in vergleichbar)
             if ohne_einkauf:
-                zeilen.append(f"  davon ohne Einkauf nach der Schließung: {ohne_einkauf}")
+                zeilen.append(f"  davon ohne Einkauf bis Laufende: {ohne_einkauf}")
             if len(vergleichbar) < len(alle):
                 zeilen.append(
                     f"  ohne Vergleich (im Vergleichslauf ab Tick {ab} kein Einkauf): {len(alle) - len(vergleichbar)}"
@@ -193,7 +204,7 @@ def bericht(lauf: Engine, vergleich: Engine | None = None) -> str:
                 zeile = f"  {merkmale:<21} {wert:>6} min   {anzahl}"
                 ohne = sum(b.kein_einkauf_mehr for b in mitglieder)
                 if ohne:
-                    zeile += f", davon {ohne} ohne Einkauf nach der Schließung"
+                    zeile += f", davon {ohne} ohne Einkauf bis Laufende"
                 zeilen.append(zeile)
 
     z = lauf.zaehler
@@ -204,7 +215,7 @@ def bericht(lauf: Engine, vergleich: Engine | None = None) -> str:
         f"{lauf.gedaechtnis.anzahl_erinnerungen()} Erinnerungen gespeichert, {routine} Routineaktionen gezählt."
     )
     if z["loop_routine"]:
-        statistik += f" {z['loop_routine']} Loops der RoutinePolicy (Regelfehler, siehe -v)."
+        statistik += f" {z['loop_routine']} Loops der RoutinePolicy (Regelfehler, Meldungen auf stderr)."
     statistik += " Invarianten in jedem Tick geprüft."
     zeilen += ["", statistik]
     return "\n".join(zeilen)

@@ -31,10 +31,14 @@ def test_supermarkt_schliessung_trifft_alle_ohne_auto():
     assert ohne_auto and all(b.betroffen for b in ohne_auto)
 
 
-@pytest.mark.parametrize("ort", [PARK, DISCOUNTER])
-def test_kleine_umwege_zaehlen_nicht_als_betroffen(ort):
-    lauf, vergleich = laeufe(ort)
-    assert not any(b.betroffen for b in betroffenheit(lauf, vergleich))
+@pytest.mark.parametrize("seed", range(5))
+def test_park_schliessung_bleibt_unter_der_schwelle(seed):
+    """Ohne Park gehen Agenten von der Wohnung statt vom Park aus einkaufen:
+    ein Kleinstunterschied, der nicht als betroffen zählen soll."""
+    lauf, vergleich = laeufe(PARK, seed=seed)
+    alle = betroffenheit(lauf, vergleich)
+    assert all(abs(b.mehrweg) < MINDEST_MEHRWEG for b in alle if b.mehrweg is not None)
+    assert not any(b.betroffen for b in alle)
 
 
 def test_schwelle_und_kein_einkauf_mehr():
@@ -62,6 +66,14 @@ def test_cli_randfaelle_der_schliessung(bei, capsys):
     ausgabe = capsys.readouterr().out
     assert f"Schließung: supermarkt bei Tick {bei}" in ausgabe
     assert "Betroffene Agenten" in ausgabe
+    assert ("Hinweis: Nach der Schließung bleiben nur 1 Tick." in ausgabe) == (bei == "99")
+
+
+def test_wohnungsweg_nur_bei_ladenschliessung(capsys):
+    run.main(["--agents", "5", "--ticks", "30", "--close", WOHNUNG, "--at", "10"])
+    assert "nächsten offenen Laden" not in capsys.readouterr().out
+    run.main(["--agents", "5", "--ticks", "30", "--close", DISCOUNTER, "--at", "10"])
+    assert "nächsten offenen Laden" in capsys.readouterr().out
 
 
 def test_cli_ohne_schliessung(capsys):

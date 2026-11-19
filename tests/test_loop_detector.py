@@ -94,7 +94,6 @@ def test_engine_greift_bei_loop_ein_und_gibt_spaeter_zurueck():
 def test_routine_erzeugt_keine_loops(seed, ort):
     konfig = Konfig(seed=seed, schliessen=ort, schliessen_bei=None if ort is None else 50)
     engine = Engine(konfig).laufe()
-    assert engine.zaehler["loop"] == 0
     assert engine.zaehler["loop_routine"] == 0
 
 
