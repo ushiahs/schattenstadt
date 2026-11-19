@@ -1,62 +1,32 @@
 """Kommandozeile: Simulation starten und Einkaufswege vor/nach einer Schließung auswerten.
 
     python -m schattenstadt.run --agents 20 --ticks 100 --close supermarkt --at 50
+
+Bei einer Schließung läuft zusätzlich ein Vergleichslauf mit gleichem Seed
+ohne Schließung. Bis zur Schließung sind beide Läufe identisch. Betroffen ist
+ein Agent, der ab der Schließung im Schnitt mindestens ``MINDEST_MEHRWEG``
+Minuten länger zum Laden braucht als im Vergleichslauf im selben Zeitraum,
+oder der gar nicht mehr einkauft.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import os
-from collections.abc import Callable
+from collections import defaultdict
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from .engine import Engine, Konfig
+from .engine import Einkaufsweg, Engine, Konfig
 from .policy import LLMPolicy, Policy
-from .world import ORTE
+from .world import LAEDEN, ORTE
 
-
-@dataclass(frozen=True)
-class Vergleich:
-    agent_id: int
-    auto: bool
-    job: str | None
-    vorher: float
-    nachher: float
-
-    @property
-    def zuwachs(self) -> float:
-        return self.nachher - self.vorher
-
-
-def _mittel(werte: list[int]) -> float | None:
-    return sum(werte) / len(werte) if werte else None
-
-
-def _zahl(wert: float | None) -> str:
-    return "-" if wert is None else f"{wert:.1f}".replace(".", ",")
-
-
-def vergleiche(engine: Engine) -> tuple[list[Vergleich], int]:
-    """Mittlere Einkaufswegzeit je Agent vor und nach der Schließung.
-
-    Rückgabe: Vergleiche für Agenten mit Einkaufswegen in beiden Phasen und
-    die Zahl der Agenten ohne Vergleich (in einer Phase kein Einkaufsweg).
-    """
-    bei = engine.konfig.schliessen_bei
-    assert bei is not None
-    vergleiche_: list[Vergleich] = []
-    ohne = 0
-    for agent in engine.agenten:
-        eigene = [w for w in engine.einkaufswege if w.agent_id == agent.id]
-        vorher = _mittel([w.minuten for w in eigene if w.tick < bei])
-        nachher = _mittel([w.minuten for w in eigene if w.tick >= bei])
-        if vorher is None or nachher is None:
-            ohne += 1
-            continue
-        vergleiche_.append(Vergleich(agent.id, agent.auto, agent.job, vorher, nachher))
-    return vergleiche_, ohne
-
+# Ab so vielen Minuten Mehrweg je Einkauf gilt ein Agent als betroffen.
+# Kleinere Unterschiede entstehen schon, wenn ein Agent von einem anderen Ort
+# aus losgeht, und sagen über die Schließung wenig.
+MINDEST_MEHRWEG = 1.0
 
 GRUPPEN: tuple[tuple[str, Callable[[bool], bool]], ...] = (
     ("alle", lambda auto: True),
@@ -65,66 +35,178 @@ GRUPPEN: tuple[tuple[str, Callable[[bool], bool]], ...] = (
 )
 
 
-def bericht(engine: Engine) -> str:
-    k = engine.konfig
-    wege = engine.einkaufswege
-    autos = sum(a.auto for a in engine.agenten)
+def _mittel(werte: Iterable[float]) -> float | None:
+    werte = list(werte)
+    return sum(werte) / len(werte) if werte else None
+
+
+def _zahl(wert: float | None) -> str:
+    return "-" if wert is None else f"{wert:.1f}".replace(".", ",")
+
+
+def _merkmale(auto: bool, job: str | None) -> str:
+    return ("mit Auto" if auto else "ohne Auto") + (", mit Job" if job else ", ohne Job")
+
+
+@dataclass(frozen=True)
+class Betroffenheit:
+    """Mittlere Einkaufswegzeit eines Agenten ab der Schließung, mit und ohne Schließung."""
+
+    agent_id: int
+    auto: bool
+    job: str | None
+    mit_schliessung: float | None
+    ohne_schliessung: float | None
+
+    @property
+    def vergleichbar(self) -> bool:
+        return self.ohne_schliessung is not None
+
+    @property
+    def kein_einkauf_mehr(self) -> bool:
+        return self.mit_schliessung is None and self.ohne_schliessung is not None
+
+    @property
+    def betroffen(self) -> bool:
+        if self.ohne_schliessung is None:
+            return False
+        if self.mit_schliessung is None:
+            return True
+        return self.mit_schliessung - self.ohne_schliessung >= MINDEST_MEHRWEG
+
+    @property
+    def mehrweg(self) -> float | None:
+        if self.mit_schliessung is None or self.ohne_schliessung is None:
+            return None
+        return self.mit_schliessung - self.ohne_schliessung
+
+
+def _minuten_je_agent(wege: list[Einkaufsweg], ab: int) -> dict[int, list[int]]:
+    je_agent: dict[int, list[int]] = defaultdict(list)
+    for weg in wege:
+        if weg.tick >= ab:
+            je_agent[weg.agent_id].append(weg.minuten)
+    return je_agent
+
+
+def betroffenheit(lauf: Engine, vergleich: Engine) -> list[Betroffenheit]:
+    ab = lauf.konfig.schliessen_bei
+    if ab is None:
+        raise ValueError("der Lauf hat keine Schließung")
+    if [(a.id, a.auto, a.job) for a in lauf.agenten] != [(a.id, a.auto, a.job) for a in vergleich.agenten]:
+        raise ValueError("Lauf und Vergleichslauf haben verschiedene Agenten")
+    mit = _minuten_je_agent(lauf.einkaufswege, ab)
+    ohne = _minuten_je_agent(vergleich.einkaufswege, ab)
+    return [
+        Betroffenheit(a.id, a.auto, a.job, _mittel(mit.get(a.id, [])), _mittel(ohne.get(a.id, [])))
+        for a in lauf.agenten
+    ]
+
+
+def naechster_laden(lauf: Engine, von: str, auto: bool, geschlossen: Iterable[str] = ()) -> int | None:
+    """Wegzeit zum nächsten Laden, der nicht in ``geschlossen`` ist."""
+    zu = set(geschlossen)
+    zeiten = [lauf.welt.wegzeit(von, laden, auto) for laden in LAEDEN if laden not in zu]
+    return min(zeiten) if zeiten else None
+
+
+def bericht(lauf: Engine, vergleich: Engine | None = None) -> str:
+    k = lauf.konfig
+    autos = sum(a.auto for a in lauf.agenten)
     zeilen = [
         f"Schattenstadt: {k.agenten} Agenten ({autos} mit Auto), {k.ticks} Ticks, "
-        f"Seed {k.seed}, Policy {engine.policy.name}",
+        f"Seed {k.seed}, Policy {lauf.policy.name}",
     ]
 
-    if k.schliessen is None:
-        zeilen += ["Keine Schließung.", "", "Durchschnittliche Einkaufswegzeit (Minuten je Hinweg)"]
+    if k.schliessen is None or k.schliessen_bei is None:
+        zeilen += ["Keine Schließung.", "", "Durchschnittliche Einkaufswegzeit (Minuten je Hinweg zum Laden)"]
         for name, passt in GRUPPEN:
-            auswahl = [w.minuten for w in wege if passt(w.auto)]
+            auswahl = [w.minuten for w in lauf.einkaufswege if passt(w.auto)]
             zeilen.append(f"  {name:<10} {_zahl(_mittel(auswahl)):>7}   ({len(auswahl)} Wege)")
     else:
-        bei = k.schliessen_bei
-        assert bei is not None
+        if vergleich is None:
+            raise ValueError("bei einer Schließung braucht der Bericht den Vergleichslauf")
+        ab = k.schliessen_bei
         zeilen += [
-            f"Schließung: {k.schliessen} bei Tick {bei}",
+            f"Schließung: {k.schliessen} bei Tick {ab}. Vergleich: gleicher Seed ohne Schließung.",
             "",
-            "Durchschnittliche Einkaufswegzeit (Minuten je Hinweg)",
-            f"  {'':<10} {'vorher':>7} {'nachher':>8}   Wege vorher/nachher",
-        ]
-        for name, passt in GRUPPEN:
-            v = [w.minuten for w in wege if passt(w.auto) and w.tick < bei]
-            n = [w.minuten for w in wege if passt(w.auto) and w.tick >= bei]
-            zeilen.append(
-                f"  {name:<10} {_zahl(_mittel(v)):>7} {_zahl(_mittel(n)):>8}   {len(v)}/{len(n)}"
-            )
-
-        vergleiche_, ohne = vergleiche(engine)
-        betroffen = [v for v in vergleiche_ if v.zuwachs > 0]
-        zeilen += [
-            "",
-            f"Betroffene Agenten (nachher im Schnitt länger unterwegs): "
-            f"{len(betroffen)} von {len(vergleiche_)} mit Einkäufen in beiden Phasen",
+            "Weg von der Wohnung zum nächsten offenen Laden (Minuten)",
+            f"  {'':<10} {'vorher':>7} {'nachher':>8}",
         ]
         for name, passt in GRUPPEN[1:]:
-            gruppe = [v for v in vergleiche_ if passt(v.auto)]
-            zeilen.append(f"  {name + ':':<11} {sum(v.zuwachs > 0 for v in gruppe)} von {len(gruppe)}")
-        if ohne:
-            zeilen.append(f"  ohne Vergleich (in einer Phase kein Einkauf): {ohne}")
-        if betroffen:
-            zeilen.append("Am stärksten betroffen:")
-            for v in sorted(betroffen, key=lambda v: (-v.zuwachs, v.agent_id))[:3]:
-                merkmale = ("mit Auto" if v.auto else "ohne Auto") + (", mit Job" if v.job else ", ohne Job")
+            gruppe = [a for a in lauf.agenten if passt(a.auto)]
+            vorher = _mittel(x for a in gruppe if (x := naechster_laden(lauf, a.wohnort, a.auto)) is not None)
+            nachher = _mittel(
+                x for a in gruppe if (x := naechster_laden(lauf, a.wohnort, a.auto, [k.schliessen])) is not None
+            )
+            zeilen.append(f"  {name:<10} {_zahl(vorher):>7} {_zahl(nachher):>8}")
+
+        zeilen += [
+            "",
+            "Durchschnittliche Einkaufswegzeit (Minuten je Hinweg zum Laden)",
+            f"  {'':<10} {'vorher':>7} {'nachher':>8} {'Vergleich':>10}   Wege vorher/nachher/Vergleich",
+        ]
+        for name, passt in GRUPPEN:
+            v = [w.minuten for w in lauf.einkaufswege if passt(w.auto) and w.tick < ab]
+            n = [w.minuten for w in lauf.einkaufswege if passt(w.auto) and w.tick >= ab]
+            o = [w.minuten for w in vergleich.einkaufswege if passt(w.auto) and w.tick >= ab]
+            zeilen.append(
+                f"  {name:<10} {_zahl(_mittel(v)):>7} {_zahl(_mittel(n)):>8} {_zahl(_mittel(o)):>10}"
+                f"   {len(v)}/{len(n)}/{len(o)}"
+            )
+        zeilen.append(f"  Vergleich: Lauf ohne Schließung, ebenfalls ab Tick {ab}.")
+
+        alle = betroffenheit(lauf, vergleich)
+        vergleichbar = [b for b in alle if b.vergleichbar]
+        zeilen.append("")
+        if not vergleichbar:
+            zeilen.append(f"Betroffene Agenten: kein Vergleich möglich (im Vergleichslauf ab Tick {ab} kein Einkauf).")
+        else:
+            betroffen = [b for b in vergleichbar if b.betroffen]
+            zeilen.append(
+                f"Betroffene Agenten (ab Tick {ab} je Einkauf mindestens {_zahl(MINDEST_MEHRWEG)} min länger "
+                f"als im Vergleich, oder kein Einkauf mehr): {len(betroffen)} von {len(vergleichbar)}"
+            )
+            for name, passt in GRUPPEN[1:]:
+                gruppe = [b for b in vergleichbar if passt(b.auto)]
+                zeilen.append(f"  {name + ':':<11} {sum(b.betroffen for b in gruppe)} von {len(gruppe)}")
+            ohne_einkauf = sum(b.kein_einkauf_mehr for b in vergleichbar)
+            if ohne_einkauf:
+                zeilen.append(f"  davon ohne Einkauf nach der Schließung: {ohne_einkauf}")
+            if len(vergleichbar) < len(alle):
                 zeilen.append(
-                    f"  Agent {v.agent_id:>2} ({merkmale}): {_zahl(v.vorher)} -> {_zahl(v.nachher)} min "
-                    f"(+{_zahl(v.zuwachs)})"
+                    f"  ohne Vergleich (im Vergleichslauf ab Tick {ab} kein Einkauf): {len(alle) - len(vergleichbar)}"
                 )
 
-    z = engine.zaehler
-    routine = sum(engine.gedaechtnis.routine().values())
-    zeilen += [
-        "",
+            gruppen: dict[str, list[Betroffenheit]] = defaultdict(list)
+            for b in vergleichbar:
+                gruppen[_merkmale(b.auto, b.job)].append(b)
+            reihen = []
+            for merkmale, mitglieder in gruppen.items():
+                mehrweg = _mittel(b.mehrweg for b in mitglieder if b.mehrweg is not None)
+                reihen.append((merkmale, mehrweg, mitglieder))
+            reihen.sort(key=lambda r: (r[1] is None, -(r[1] or 0.0), r[0]))
+            zeilen += ["", "Mehrweg je Einkauf gegenüber dem Vergleich, nach Gruppe"]
+            for merkmale, mehrweg, mitglieder in reihen:
+                wert = ("+" if mehrweg is not None and mehrweg >= 0 else "") + _zahl(mehrweg)
+                anzahl = f"{len(mitglieder)} Agent" + ("" if len(mitglieder) == 1 else "en")
+                zeile = f"  {merkmale:<21} {wert:>6} min   {anzahl}"
+                ohne = sum(b.kein_einkauf_mehr for b in mitglieder)
+                if ohne:
+                    zeile += f", davon {ohne} ohne Einkauf nach der Schließung"
+                zeilen.append(zeile)
+
+    z = lauf.zaehler
+    routine = sum(lauf.gedaechtnis.routine().values())
+    statistik = (
         f"Lauf: {z['entscheidungen']} Entscheidungen, {z['ungueltig'] + z['policy_fehler']} Fehlversuche, "
         f"{z['fallback']} Fallbacks auf Routine, {z['loop']} Loop-Eingriffe, "
-        f"{engine.gedaechtnis.anzahl_erinnerungen()} Erinnerungen gespeichert, {routine} Routineaktionen gezählt. "
-        f"Invarianten in jedem Tick geprüft.",
-    ]
+        f"{lauf.gedaechtnis.anzahl_erinnerungen()} Erinnerungen gespeichert, {routine} Routineaktionen gezählt."
+    )
+    if z["loop_routine"]:
+        statistik += f" {z['loop_routine']} Loops der RoutinePolicy (Regelfehler, siehe -v)."
+    statistik += " Invarianten in jedem Tick geprüft."
+    zeilen += ["", statistik]
     return "\n".join(zeilen)
 
 
@@ -144,9 +226,15 @@ def _parser() -> argparse.ArgumentParser:
         default="routine",
         help="routine (Standard) oder llm (Stub ohne API-Call, fällt immer auf routine zurück)",
     )
-    p.add_argument("--db", default=":memory:", help="SQLite-Datei für Erinnerungen (Standard: nur im Speicher)")
+    p.add_argument(
+        "--db", default=":memory:", help="SQLite-Datei für die Erinnerungen des Hauptlaufs (Standard: nur im Speicher)"
+    )
     p.add_argument("-v", "--verbose", action="store_true", help="Protokoll (Schließung, Loops) ausgeben")
     return p
+
+
+def _policy(name: str) -> Policy | None:
+    return LLMPolicy() if name == "llm" else None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -163,7 +251,6 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.ERROR, format="%(message)s")
 
-    policy: Policy | None = LLMPolicy() if args.policy == "llm" else None
     konfig = Konfig(
         agenten=args.agents,
         ticks=args.ticks,
@@ -172,12 +259,21 @@ def main(argv: list[str] | None = None) -> int:
         schliessen_bei=args.at,
         db=args.db,
     )
-    engine = Engine(konfig, policy=policy)
+    laeufe: list[Engine] = []
     try:
-        engine.laufe()
-        print(bericht(engine))
+        lauf = Engine(konfig, policy=_policy(args.policy))
+        laeufe.append(lauf)
+        lauf.laufe()
+        vergleich = None
+        if konfig.schliessen is not None:
+            ohne = dataclasses.replace(konfig, schliessen=None, schliessen_bei=None, db=":memory:")
+            vergleich = Engine(ohne, policy=_policy(args.policy))
+            laeufe.append(vergleich)
+            vergleich.laufe()
+        print(bericht(lauf, vergleich))
     finally:
-        engine.schliessen()
+        for engine in laeufe:
+            engine.schliessen()
     return 0
 
 
